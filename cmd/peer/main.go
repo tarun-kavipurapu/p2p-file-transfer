@@ -17,7 +17,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error startign peer server")
 	}
-	err = p.ConnectServer(":3000")
+	err = p.Connect(":3000", "central")
 	if err != nil {
 		log.Fatalf("Failed to connect to server: %v", err)
 	}

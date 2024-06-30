@@ -19,15 +19,15 @@ func (s *Store) openFile(path string) (*os.File, error) {
 	}
 	return file, nil
 }
-func (s *Store) createChunkDirectory(hashString string) (string, error) {
-	fileDirectory := fmt.Sprintf("chunks/%s", hashString)
+func (s *Store) createChunkDirectory(folderName string, hashString string) (string, error) {
+	fileDirectory := fmt.Sprintf("%s/%s", folderName, hashString)
 	err := os.MkdirAll(fileDirectory, os.ModePerm)
 	if err != nil {
 		return "", err
 	}
 	return fileDirectory, nil
 }
-func (s *Store) writeChunk(fileDirectory string, chunkIndex uint32, r io.Reader, bytesRead int) error {
+func (s *Store) writeChunk(fileDirectory string, chunkIndex uint32, r io.Reader) error {
 	chunkName := fmt.Sprintf("chunk_%d.chunk", chunkIndex)
 	chunkFilePath := filepath.Join(fileDirectory, chunkName)
 
@@ -61,9 +61,28 @@ func (s *Store) divideToChunk(file *os.File, chunkSize int, fileDirectory string
 
 		chunkMap[i] = &chunkMetaData
 
-		if err := s.writeChunk(fileDirectory, i, bytes.NewBuffer(buffer), bytesRead); err != nil {
+		if err := s.writeChunk(fileDirectory, i, bytes.NewBuffer(buffer)); err != nil {
 			return err, nil
 		}
 	}
 	return nil, chunkMap
+}
+
+func (s *Store) fetchFileByChunkId(fileId string, chunkIndex uint32) ([]byte, error) {
+	chunkName := fmt.Sprintf("chunk_%d.chunk", chunkIndex)
+	fileDirectory := fmt.Sprintf("chunks/%s", fileId)
+
+	chunkFilePath := filepath.Join(fileDirectory, chunkName)
+
+	file, err := s.openFile(chunkFilePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := pkg.ReadBytes(file)
+	if err != nil {
+		return nil, err
+	}
+	return data, err
+
 }

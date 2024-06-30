@@ -10,21 +10,12 @@ import (
 
 type Decoder struct{}
 
-func RegisterTypes() {
-	gob.Register(Message{})
-	gob.Register(FileMetaData{})
-	gob.Register(PeerMetadata{})
-	gob.Register(ChunkMetadata{})
-}
-
-func (d *Decoder) ReadBytes(r io.Reader) ([]byte, error) {
-	var buf bytes.Buffer
-	_, err := io.Copy(&buf, r)
-	if err != nil {
-		return nil, fmt.Errorf("error reading bytes: %w", err)
-	}
-	return buf.Bytes(), nil
-}
+// func RegisterTypes() {
+// 	gob.Register(Message{})
+// 	gob.Register(FileMetaData{})
+// 	gob.Register(PeerMetadata{})
+// 	gob.Register(ChunkMetadata{})
+// }
 
 func (d *Decoder) DecodeFromBytes(data []byte, v interface{}) error {
 	buf := bytes.NewBuffer(data)

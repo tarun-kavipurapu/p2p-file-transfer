@@ -74,53 +74,55 @@ func (cs *CentralServer) SendResponse(addr string, message pkg.Message) error {
 }
 
 func (cs *CentralServer) consumeMessages() {
-	cs.wg.Add(1)
 
-	for message := range cs.tcpTransport.Consume() {
-		switch message.Type {
-		case "register_peer":
-			log.Printf("Registering peer: %s\n", message.From)
-			if err := cs.registerPeer(message); err != nil {
-				log.Printf("Error registering peer: %v", err)
-			} else {
-				log.Printf("Registration done: %s\n", message.From)
+	for {
+		select {
+		case message := <-cs.tcpTransport.Consume():
+			switch message.Type {
+			case "register_peer":
+				log.Printf("Registering peer: %s\n", message.From)
+				if err := cs.registerPeer(message); err != nil {
+					log.Printf("Error registering peer: %v", err)
+				} else {
+					log.Printf("Registration done: %s\n", message.From)
+				}
+			case "register_file":
+				//Decode the meta Data fromm the input
+				var fileMetaData pkg.FileMetaData
+				err := cs.tcpTransport.Decoder.DecodeFromBytes(message.Payload, &fileMetaData)
+				if err != nil {
+					log.Printf("Error decoding file metadata: %v", err)
+					continue
+				}
+
+				// myMap := fileMetaData.ChunkInfo
+				// for key, val := range myMap {
+				// 	fmt.Printf("Key: %d, Value: %s\n", key, val)
+				// }
+
+				log.Printf("Registering file from peer: %s\n", message.From)
+				if err := cs.registerFile(fileMetaData, message.FromAddr); err != nil {
+					log.Printf("Error registering file: %v", err)
+				} else {
+					log.Printf("File registration done: %s\n", message.From)
+				}
+			case "request_file":
+				log.Println("I am here")
+				var fileID string
+				err := cs.tcpTransport.Decoder.DecodeFromBytes(message.Payload, &fileID)
+				log.Println("File ID received", (fileID))
+				if err != nil {
+					log.Printf("Error decoding file Id: %v", err)
+					continue
+				}
+
+				cs.requestFile(fileID, message.FromAddr)
+
+			case "request_chunk":
+				log.Printf("Peer %s requesting chunk\n", message.From)
+			default:
+				log.Printf("Unknown message type: %s\n", message.Type)
 			}
-		case "register_file":
-			//Decode the meta Data fromm the input
-			var fileMetaData pkg.FileMetaData
-			err := cs.tcpTransport.Decoder.DecodeFromBytes(message.Payload, &fileMetaData)
-			if err != nil {
-				log.Printf("Error decoding file metadata: %v", err)
-				continue
-			}
-
-			// myMap := fileMetaData.ChunkInfo
-			// for key, val := range myMap {
-			// 	fmt.Printf("Key: %d, Value: %s\n", key, val)
-			// }
-
-			log.Printf("Registering file from peer: %s\n", message.From)
-			if err := cs.registerFile(fileMetaData, message.FromAddr); err != nil {
-				log.Printf("Error registering file: %v", err)
-			} else {
-				log.Printf("File registration done: %s\n", message.From)
-			}
-		case "request_file":
-			log.Println("I am here")
-			var fileID string
-			err := cs.tcpTransport.Decoder.DecodeFromBytes(message.Payload, &fileID)
-			log.Println("File ID received", (fileID))
-			if err != nil {
-				log.Printf("Error decoding file Id: %v", err)
-				continue
-			}
-
-			cs.requestFile(fileID, message.FromAddr)
-
-		case "request_chunk":
-			log.Printf("Peer %s requesting chunk\n", message.From)
-		default:
-			log.Printf("Unknown message type: %s\n", message.Type)
 		}
 	}
 }
