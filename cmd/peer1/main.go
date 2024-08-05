@@ -26,11 +26,6 @@ func main() {
 	}()
 
 	time.Sleep(1 * time.Second)
-	// err = p.RegisterFile("/mnt/d/Devlopement/p2p-file-transfer/TestingFiles/test_image.tif")
-	// err = p.RegisterFile("D:\\Devlopement\\go-network-Stream\\TestingFiles\\test_image.tif")
-	// if err != nil {
-	// 	log.Println("Error Register peer", err)
-	// }
 
 	err := p.RequestChunkData("017934bd678d02194f615f9e27cab2a72839fc28653daaf81ac7933f2945467d")
 

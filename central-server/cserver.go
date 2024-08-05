@@ -14,6 +14,7 @@ func init() {
 	gob.Register(pkg.ChunkMetadata{})
 	gob.Register(pkg.RequestChunkData{})
 	gob.Register(pkg.ChunkRequestToPeer{})
+	gob.Register(pkg.RegisterSeeder{})
 
 }
 
@@ -21,7 +22,7 @@ type CentralServer struct {
 	mu        sync.Mutex
 	peers     map[string]pkg.Peer //conn
 	Transport pkg.Transport
-	files     map[string]*pkg.FileMetaData
+	files     map[string]*pkg.FileMetaData //fileId-->fileMetadata
 	quitch    chan struct{}
 }
 
@@ -89,10 +90,41 @@ func (c *CentralServer) handleMessage(from string, dataMsg *pkg.DataMessage) err
 
 		return c.handleRequestChunkData(from, v)
 
+	case pkg.RegisterSeeder:
+		return c.registerSeeder(v)
+
 	}
 	return nil
 }
 
+func (c *CentralServer) registerSeeder(msg pkg.RegisterSeeder) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	fileMetadata, exists := c.files[msg.FileId]
+	if !exists {
+		return fmt.Errorf("file with ID %s not found", msg.FileId)
+	}
+
+	for _, chunkMetadata := range fileMetadata.ChunkInfo {
+		// Check if the peer is already in the list
+		peerExists := false
+		for _, peer := range chunkMetadata.PeersWithChunk {
+			if peer == msg.PeerAddr {
+				peerExists = true
+				break
+			}
+		}
+
+		// If the peer is not in the list, add it
+		if !peerExists {
+			chunkMetadata.PeersWithChunk = append(chunkMetadata.PeersWithChunk, msg.PeerAddr)
+		}
+	}
+
+	log.Printf("Registered peer %s as a new seeder for file %s\n", msg.PeerAddr, msg.FileId)
+	return nil
+}
 func (c *CentralServer) handleRequestChunkData(from string, msg pkg.RequestChunkData) error {
 	fileId := msg.FileId
 	c.mu.Lock()

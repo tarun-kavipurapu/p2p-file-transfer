@@ -20,40 +20,98 @@ type ChunkStatus struct {
 	isFetching bool
 }
 
-type ChunkResult struct {
-	FileId string
-	Index  uint32
-	Data   []byte
-	Err    error
+type ChunkJob struct {
+	FileId     string
+	ChunkIndex uint32
+	PeerAddr   string
+	ChunkHash  string
+	p          *PeerServer
 }
 
-func (p *PeerServer) handleChunks(fileMetaData pkg.FileMetaData) {
+func (cj *ChunkJob) Execute() error {
+	return cj.p.fileRequest(cj.FileId, cj.ChunkIndex, cj.PeerAddr, cj.ChunkHash)
+}
 
-	var chunkStatus []ChunkStatus
-
+func (p *PeerServer) handleChunks(fileMetaData pkg.FileMetaData) error {
 	numOfChunks := uint32(len(fileMetaData.ChunkInfo))
+	chunkPeerAssign := assignChunks(fileMetaData)
 
-	for i := uint32(1); i <= numOfChunks; i++ {
-		chunkStatus = append(chunkStatus, ChunkStatus{Index: i})
-	}
-	chunkPeerAssign := assignChunks(fileMetaData, chunkStatus)
-	log.Println(chunkPeerAssign)
+	log.Printf("[PeerServer] Starting download of file %s (%s) with %d chunks", fileMetaData.FileName, fileMetaData.FileId, numOfChunks)
+
+	const maxWorkers = 5
+	workerPool := NewWorkerPool(maxWorkers)
+	workerPool.Start()
+
 	var wg sync.WaitGroup
-	for index, ele := range chunkPeerAssign {
-		chunk := fileMetaData.ChunkInfo[index]
+	for index, peerAddr := range chunkPeerAssign {
 		wg.Add(1)
-		go func() {
+		go func(index uint32, peerAddr string) {
 			defer wg.Done()
-			p.fileRequest(fileMetaData.FileId, index, ele, chunk.ChunkHash)
-
-		}()
+			chunk := fileMetaData.ChunkInfo[index]
+			job := &ChunkJob{
+				FileId:     fileMetaData.FileId,
+				ChunkIndex: index,
+				PeerAddr:   peerAddr,
+				ChunkHash:  chunk.ChunkHash,
+				p:          p,
+			}
+			workerPool.Submit(job)
+		}(index, peerAddr)
 	}
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		workerPool.Stop()
+	}()
+
+	successfulChunks := 0
+	var resultLock sync.Mutex
+	var lastError error
+
+	for result := range workerPool.Results() {
+		chunkJob := result.Job.(*ChunkJob)
+		if result.Err != nil {
+			log.Printf("[PeerServer] Failed to fetch chunk %d from peer %s: %v", chunkJob.ChunkIndex, chunkJob.PeerAddr, result.Err)
+			lastError = result.Err
+		} else {
+			resultLock.Lock()
+			successfulChunks++
+			resultLock.Unlock()
+			log.Printf("[PeerServer] Fetched chunk %d/%d from peer %s", successfulChunks, numOfChunks, chunkJob.PeerAddr)
+		}
+	}
+
+	<-workerPool.Done()
+
+	if successfulChunks != int(numOfChunks) {
+		return fmt.Errorf("download incomplete for file %s. Fetched %d/%d chunks. Last error: %v", fileMetaData.FileName, successfulChunks, numOfChunks, lastError)
+	}
+
+	log.Printf("[PeerServer] All %d chunks fetched successfully for file %s. Reassembling...", numOfChunks, fileMetaData.FileName)
+	err := p.store.ReassembleFile(fileMetaData.FileId, fileMetaData.FileName, fileMetaData.FileExtension, p.peerServAddr)
+	if err != nil {
+		return fmt.Errorf("error reassembling file %s: %w", fileMetaData.FileName, err)
+	}
+
+	log.Printf("[PeerServer] File %s reassembled successfully", fileMetaData.FileName)
+
+	p.downloadsMutex.Lock()
+	p.completedDownloads[fileMetaData.FileId] = true
+	p.downloadsMutex.Unlock()
+
+	log.Printf("[PeerServer] Marked file %s (%s) as completed download", fileMetaData.FileName, fileMetaData.FileId)
+
+	err = p.registerAsSeeder(fileMetaData.FileId)
+	if err != nil {
+		return fmt.Errorf("failed to register as seeder for file %s: %w", fileMetaData.FileName, err)
+	}
+
+	log.Printf("[PeerServer] Successfully registered as a new seeder for file %s", fileMetaData.FileName)
+	return nil
 }
 func (p *PeerServer) fileRequest(fileId string, chunkIndex uint32, peerAddr string, chunkHash string) error {
 	conn, err := net.Dial("tcp", peerAddr)
 	if err != nil {
-		return fmt.Errorf("failed to dial %s: %w", peerAddr, err)
+		return fmt.Errorf("failed to connect to peer %s: %w", peerAddr, err)
 	}
 	defer conn.Close()
 
@@ -64,7 +122,6 @@ func (p *PeerServer) fileRequest(fileId string, chunkIndex uint32, peerAddr stri
 	p.peers[peerAddr] = peer
 	p.peerLock.Unlock()
 
-	// Ensure peer is removed from map and connection is closed when we're done
 	defer func() {
 		p.peerLock.Lock()
 		delete(p.peers, peerAddr)
@@ -82,14 +139,13 @@ func (p *PeerServer) fileRequest(fileId string, chunkIndex uint32, peerAddr stri
 	var buf bytes.Buffer
 	encoder := gob.NewEncoder(&buf)
 	if err := encoder.Encode(dataMessage); err != nil {
-		return fmt.Errorf("failed to encode data message: %w", err)
+		return fmt.Errorf("failed to encode chunk request: %w", err)
 	}
 
 	if err := peer.Send(buf.Bytes()); err != nil {
-		return fmt.Errorf("failed to send data message to peer %s: %w", peerAddr, err)
+		return fmt.Errorf("failed to send chunk request to peer %s: %w", peerAddr, err)
 	}
 
-	// Handle response
 	var chunkId int64
 	var fileSize int64
 
@@ -101,9 +157,8 @@ func (p *PeerServer) fileRequest(fileId string, chunkIndex uint32, peerAddr stri
 		return fmt.Errorf("failed to read file size from peer %s: %w", peerAddr, err)
 	}
 
-	log.Printf("Receiving chunk id: %d, file size: %d\n", chunkId, fileSize)
-
-	folderDirectory, err := p.store.createChunkDirectory("chunks-new", fileId)
+	baseDir := fmt.Sprintf("chunks-%s", p.peerServAddr)
+	folderDirectory, err := p.store.createChunkDirectory(baseDir, fileId)
 	if err != nil {
 		return fmt.Errorf("failed to create chunk directory: %w", err)
 	}
@@ -118,50 +173,36 @@ func (p *PeerServer) fileRequest(fileId string, chunkIndex uint32, peerAddr stri
 	defer writeFile.Close()
 
 	if _, err := io.CopyN(writeFile, peer, fileSize); err != nil {
-		return fmt.Errorf("failed to copy file from peer %s: %w", peerAddr, err)
+		return fmt.Errorf("failed to copy chunk data from peer %s: %w", peerAddr, err)
 	}
 
-	// Re-open the file to hash it
 	if _, err := writeFile.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek to start of file %s: %w", filePath, err)
 	}
 
-	//check the validity of the file with the hash
-	// Check the hash of the file
 	if err := pkg.CheckFileHash(writeFile, chunkHash); err != nil {
-		return err
+		return fmt.Errorf("chunk hash verification failed: %w", err)
 	}
-
-	log.Printf("Successfully received and saved chunk_%d.chunk\n", chunkId)
 
 	return nil
 }
-func assignChunks(fileMetaData pkg.FileMetaData, chunkStatus []ChunkStatus) map[uint32]string {
-	//we need to perform the load balancing which means that i need to select the ip adress to which least amount of chunks are assigned
-	//in future we need make this ee=vene more solid by making it request another peer if the peer over here is not onnline
+func assignChunks(fileMetaData pkg.FileMetaData) map[uint32]string {
 	chunkPeerAssign := make(map[uint32]string) //chunkIndex->peer
 	peerLoad := make(map[string]uint32)        //peerId ->number of chunks
-	file := fileMetaData
-	for _, chunk := range chunkStatus {
-		if !chunk.isFetched && !chunk.isFetching {
 
-			peers := file.ChunkInfo[chunk.Index].PeersWithChunk //select the peers array
-			if len(peers) > 0 {
-				minPeer := peers[0]
-				for _, peer := range peers {
-					if peerLoad[peer] < peerLoad[minPeer] {
-						minPeer = peer
-					}
-
+	for index, chunkInfo := range fileMetaData.ChunkInfo {
+		peers := chunkInfo.PeersWithChunk
+		if len(peers) > 0 {
+			minPeer := peers[0]
+			for _, peer := range peers {
+				if peerLoad[peer] < peerLoad[minPeer] {
+					minPeer = peer
 				}
-				peerLoad[minPeer]++
-				chunkPeerAssign[chunk.Index] = minPeer
-				chunk.isFetching = true
-
 			}
+			peerLoad[minPeer]++
+			chunkPeerAssign[index] = minPeer
 		}
-
 	}
-	//i will traverse through the array of peers for a specific chunk  and enter them into the peerLoad map select the peer which has the minimum load
+
 	return chunkPeerAssign
 }

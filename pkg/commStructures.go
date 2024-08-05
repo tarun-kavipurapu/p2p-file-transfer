@@ -19,3 +19,8 @@ type ChunkRequestToPeer struct {
 	ChunkId   uint32
 	ChunkName string
 }
+
+type RegisterSeeder struct {
+	FileId   string
+	PeerAddr string
+}
